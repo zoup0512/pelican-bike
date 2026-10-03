@@ -1,10 +1,12 @@
 // 双开浏览器 E2E：建房→加入→倒计时→骑行→波次→强制捕鱼→计分→终局
-// 用法：node test/e2e.mjs   （需要 Edge；自动起静态服务 + 游戏服务器）
+// 用法：node test/e2e.mjs                     （本地：自动起静态服务 + 游戏服务器）
+//       E2E_TARGET=http://host:8091 node test/e2e.mjs   （线上：直接测部署环境）
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright-core';
 
+const LIVE = process.env.E2E_TARGET;
 const WEB = 18094, GAME = 18093;
 let failures = 0;
 const ok = (cond, name) => {
@@ -13,25 +15,31 @@ const ok = (cond, name) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 游戏服务器
-const game = spawn(process.execPath, ['server/index.mjs'], { env: { ...process.env, PORT: String(GAME), HOST: '127.0.0.1' }, stdio: 'pipe' });
-game.stdout.on('data', (d) => process.env.VERBOSE && console.log('[game]', String(d).trim()));
+let game = null, web = null;
+const URL_ = LIVE
+  ? `${LIVE}/?autostart=1&ws=${encodeURIComponent(LIVE.replace(/^http/, 'ws'))}/ws&q=low&fast=1`
+  : `http://127.0.0.1:${WEB}/?autostart=1&ws=ws://127.0.0.1:${GAME}&q=low&fast=1`;
+if (!LIVE) {
+  // 游戏服务器
+  game = spawn(process.execPath, ['server/index.mjs'], { env: { ...process.env, PORT: String(GAME), HOST: '127.0.0.1' }, stdio: 'pipe' });
+  game.stdout.on('data', (d) => process.env.VERBOSE && console.log('[game]', String(d).trim()));
+  game.stderr.on('data', (d) => console.log('[game-err]', String(d).trim()));
 
-// 静态服务
-const html = await readFile('dist/index.html', 'utf8');
-const web = createServer(async (req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(html);
-}).listen(WEB);
-
-await sleep(600);
+  // 静态服务
+  const html = await readFile('dist/index.html', 'utf8');
+  web = createServer(async (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+  }).listen(WEB);
+  await sleep(600);
+}
 
 const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--enable-unsafe-swiftshader'] });
 const mkPage = async () => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 700 } });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log('  [pageerror]', e.message.slice(0, 160)));
-  await page.goto(`http://127.0.0.1:${WEB}/?autostart=1&ws=ws://127.0.0.1:${GAME}&q=low&fast=1`, { timeout: 60000, waitUntil: 'domcontentloaded' });
+  await page.goto(URL_, { timeout: 60000, waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => document.body.classList.contains('ready'), null, { timeout: 60000 });
   return page;
 };
@@ -138,8 +146,8 @@ try {
   console.log('  ✗ EXCEPTION', e.message);
 } finally {
   await browser.close().catch(() => {});
-  web.close();
-  game.kill();
+  web?.close();
+  game?.kill();
 }
 
 console.log(failures === 0 ? '\nE2E 全部通过 ✓' : `\n${failures} 项失败 ✗`);
